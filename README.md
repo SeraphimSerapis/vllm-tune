@@ -54,6 +54,16 @@ curl -fsSL https://raw.githubusercontent.com/SeraphimSerapis/vllm-tune/main/inst
 git clone https://github.com/SeraphimSerapis/vllm-tune.git ~/vllm-tune
 ```
 
+## Prerequisites
+
+vLLM-Tune runs tuning benchmarks **inside a running vLLM container**. Before running `vllm-tune.sh`, make sure you have:
+
+1. A running vLLM Docker container (default name: `vllm_node`, override with `-t`)
+   — e.g. launched via [spark-vllm-docker](https://github.com/NVIDIA/spark-vllm-docker)'s `launch-cluster.sh`
+2. `jq` installed on the host
+3. `tmux` (optional, for `--tmux` detachable sessions)
+4. `sudo` access (optional, for cache clearing between tuning rounds)
+
 ## Quick Start
 
 ```bash
@@ -234,12 +244,7 @@ VLLM_TUNED_CONFIG_FOLDER=/opt/vllm-tuned-configs
 > (`fp8_utils.py`) do not check this env var — they must be placed in the
 > hardcoded `configs/` directory via `docker cp` or image build.
 
-## Requirements
 
-- A running vLLM container (default: `vllm_node`, override with `-t`)
-- `jq` on the host
-- `tmux` (optional, for `--tmux` mode)
-- `sudo` access (optional, for cache clearing between rounds)
 
 ## Environment Variables
 
