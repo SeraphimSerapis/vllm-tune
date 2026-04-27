@@ -100,18 +100,38 @@ echo "  Checking prerequisites..."
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 missing=()
+# docker is not apt-installable in the usual sense; flag separately
+missing_noinstall=()
 for cmd in git jq docker rsync; do
     if command -v "$cmd" &>/dev/null; then
         ok "$cmd"
     else
         fail "$cmd — not found"
-        missing+=("$cmd")
+        if [[ "$cmd" == "docker" ]]; then
+            missing_noinstall+=("$cmd")
+        else
+            missing+=("$cmd")
+        fi
     fi
 done
 
 if [[ ${#missing[@]} -gt 0 ]]; then
     echo
-    warn "Missing: ${missing[*]}"
+    if ask_yn "Install missing packages (${missing[*]}) via apt?"; then
+        info "Running: sudo apt install -y ${missing[*]}"
+        if sudo apt install -y "${missing[@]}"; then
+            ok "Installed ${missing[*]}"
+            missing=()
+        else
+            fail "apt install failed."
+        fi
+    fi
+fi
+
+if [[ ${#missing[@]} -gt 0 || ${#missing_noinstall[@]} -gt 0 ]]; then
+    echo
+    [[ ${#missing[@]} -gt 0 ]] && warn "Still missing: ${missing[*]}"
+    [[ ${#missing_noinstall[@]} -gt 0 ]] && warn "Missing (install manually): ${missing_noinstall[*]}"
     warn "Install them and re-run this script."
     echo
     exit 1
