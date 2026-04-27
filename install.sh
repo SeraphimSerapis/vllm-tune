@@ -39,7 +39,7 @@ ask() {
     else
         printf "  %s: " "$prompt"
     fi
-    read -r answer
+    read -r answer </dev/tty
     echo "${answer:-$default}"
 }
 
@@ -48,7 +48,7 @@ ask_yn() {
     local hint="Y/n"
     [[ "$default" =~ ^[Nn] ]] && hint="y/N"
     printf "  %s [%s] " "$prompt" "$hint"
-    read -r answer
+    read -r answer </dev/tty
     answer="${answer:-$default}"
     [[ "$answer" =~ ^[Yy] ]]
 }
