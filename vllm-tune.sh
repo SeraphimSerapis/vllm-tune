@@ -221,7 +221,17 @@ fi
 
 if ! $DEPLOY_ONLY; then
     if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER"; then
-        die "Container '$CONTAINER' is not running. Start it first."
+        echo "" >&2
+        echo "  Error: No running container named '$CONTAINER'." >&2
+        echo "" >&2
+        echo "  vLLM-Tune needs a running vLLM container to tune kernels inside." >&2
+        echo "  Start one first, e.g.:" >&2
+        echo "    launch-cluster.sh ...    # spark-vllm-docker" >&2
+        echo "" >&2
+        if [[ "$CONTAINER" == "vllm_node" ]]; then
+            echo "  Using a different container name? Pass -t <name>" >&2
+        fi
+        exit 1
     fi
     command -v jq &>/dev/null || die "jq is required. Install: sudo apt install jq"
 fi
@@ -284,7 +294,15 @@ deploy_all() {
 
 if $DEPLOY_ONLY; then
     if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$CONTAINER"; then
-        die "Container '$CONTAINER' is not running."
+        echo "" >&2
+        echo "  Error: No running container named '$CONTAINER'." >&2
+        echo "" >&2
+        echo "  Start a vLLM container first, then re-run with --deploy-only." >&2
+        if [[ "$CONTAINER" == "vllm_node" ]]; then
+            echo "  Using a different container name? Pass -t <name>" >&2
+        fi
+        echo "" >&2
+        exit 1
     fi
 
     deploy_all
