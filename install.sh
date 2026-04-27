@@ -13,6 +13,7 @@ set -euo pipefail
 
 # ── Defaults ────────────────────────────────────────────────────────
 
+INSTALLER_VERSION="v0.1.3"
 REPO_URL="${VLLM_TUNE_REPO:-https://github.com/SeraphimSerapis/vllm-tune.git}"
 INSTALL_DIR="${VLLM_TUNE_DIR:-$HOME/vllm-tune}"
 SHELL_RC=""
@@ -31,13 +32,15 @@ warn()  { printf "  %s %s\n" "$(yellow "⚠")" "$*"; }
 fail()  { printf "  %s %s\n" "$(red "✗")" "$*"; }
 
 # ── Helpers ─────────────────────────────────────────────────────────
+# All interactive I/O goes through /dev/tty so the script works when
+# piped from curl (where stdin is the HTTP stream, not the terminal).
 
 ask() {
     local prompt="$1" default="${2:-}"
     if [[ -n "$default" ]]; then
-        printf "  %s [%s]: " "$prompt" "$default"
+        printf "  %s [%s]: " "$prompt" "$default" >/dev/tty
     else
-        printf "  %s: " "$prompt"
+        printf "  %s: " "$prompt" >/dev/tty
     fi
     read -r answer </dev/tty
     echo "${answer:-$default}"
@@ -47,7 +50,7 @@ ask_yn() {
     local prompt="$1" default="${2:-Y}"
     local hint="Y/n"
     [[ "$default" =~ ^[Nn] ]] && hint="y/N"
-    printf "  %s [%s] " "$prompt" "$hint"
+    printf "  %s [%s] " "$prompt" "$hint" >/dev/tty
     read -r answer </dev/tty
     answer="${answer:-$default}"
     [[ "$answer" =~ ^[Yy] ]]
@@ -90,7 +93,7 @@ cat << 'EOF'
 EOF
 printf "\033[0m"
 echo
-echo "  Installer — Triton kernel tuning for vLLM on NVIDIA GPUs"
+echo "  Installer $INSTALLER_VERSION — Triton kernel tuning for vLLM on NVIDIA GPUs"
 echo
 
 # ── Prerequisites ───────────────────────────────────────────────────
