@@ -233,8 +233,15 @@ else
         ok "Added to $SHELL_RC"
         info "Run 'source $SHELL_RC' or open a new terminal."
     else
-        info "Skipped. Run manually:"
+        # Provide shell-specific guidance
+        _skip_shell="$(basename "${SHELL:-/bin/bash}")"
+        _skip_rc="$HOME/.bashrc"
+        [[ "$_skip_shell" == "zsh" ]] && _skip_rc="$HOME/.zshrc"
+        echo
+        info "Skipped. Add this line to your $_skip_rc:"
+        echo
         echo "    export PATH=\"$INSTALL_DIR:\$PATH\""
+        echo
     fi
 fi
 echo
