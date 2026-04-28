@@ -298,7 +298,34 @@ TOTAL=${#SHAPES[@]}
 COMPLETED=0
 FAILED=()
 SUCCEEDED=()
+SKIPPED=()
 declare -A TIMINGS
+
+# Check if a shape is already fully tuned for all requested batch sizes.
+# Reads the device name from any existing config file, then checks if
+# the specific shape's config file exists and contains all batch sizes.
+# Returns 0 (fully tuned) or 1 (needs tuning).
+_shape_already_tuned() {
+    local n="$1" k="$2"
+    # Find matching config file (we don't know device_name yet, so glob it)
+    local pattern="$CONFIGS_DIR/N=${n},K=${k},device_name=*,dtype=fp8_w8a8,block_shape=*.json"
+    local cfg
+    for cfg in $pattern; do
+        [[ -f "$cfg" ]] || continue
+        # Check if all requested batch sizes are present as keys
+        local all_present=true
+        for bs in "${BATCH_SIZES[@]}"; do
+            if ! jq -e --arg k "$bs" 'has($k)' "$cfg" >/dev/null 2>&1; then
+                all_present=false
+                break
+            fi
+        done
+        if $all_present; then
+            return 0
+        fi
+    done
+    return 1
+}
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 printf "  \033[1mW8A8 Block FP8 Kernel Tuning\033[0m\n"
@@ -324,6 +351,13 @@ for SHAPE in "${SHAPES[@]}"; do
     K="${SHAPE##*,}"
     COMPLETED=$((COMPLETED + 1))
 
+    # Skip shapes that are already fully tuned
+    if _shape_already_tuned "$N" "$K"; then
+        printf "  ⏭ [%d/%d] N=%s,K=%s — already tuned, skipping\n" "$COMPLETED" "$TOTAL" "$N" "$K"
+        SKIPPED+=("${N},${K}")
+        continue
+    fi
+
     echo "┌─────────────────────────────────────────────────────────────────"
     printf "│ \033[1m[%d/%d] Tuning N=%s, K=%s\033[0m\n" "$COMPLETED" "$TOTAL" "$N" "$K"
     echo "└─────────────────────────────────────────────────────────────────"
@@ -346,6 +380,11 @@ for SHAPE in "${SHAPES[@]}"; do
 
     post_round
 done
+
+if [[ ${#SKIPPED[@]} -gt 0 ]]; then
+    echo "  ⏭ Skipped ${#SKIPPED[@]} already-tuned shape(s): ${SKIPPED[*]}"
+    echo
+fi
 
 TUNING_ELAPSED=$(( SECONDS - TUNING_START ))
 

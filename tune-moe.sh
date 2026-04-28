@@ -114,7 +114,22 @@ TOTAL=${#BATCH_SIZES[@]}
 COMPLETED=0
 FAILED=()
 SUCCEEDED=()
+SKIPPED=()
 declare -A TIMINGS
+
+# Check if a batch size is already tuned in existing config files.
+# Looks for the batch size key inside any matching config JSON.
+# Returns 0 (already tuned) or 1 (needs tuning).
+_batch_already_tuned() {
+    local bs="$1"
+    for cfg in "$CONFIGS_DIR"/*.json; do
+        [[ -f "$cfg" ]] || continue
+        if jq -e --arg k "$bs" 'has($k)' "$cfg" >/dev/null 2>&1; then
+            return 0
+        fi
+    done
+    return 1
+}
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 printf "  \033[1mMoE Kernel Tuning\033[0m\n"
@@ -137,6 +152,14 @@ TUNING_START=$SECONDS
 
 for BS in "${BATCH_SIZES[@]}"; do
     COMPLETED=$((COMPLETED + 1))
+
+    # Skip batch sizes that are already tuned
+    if _batch_already_tuned "$BS"; then
+        printf "  ⏭ [%d/%d] batch_size=%s — already tuned, skipping\n" "$COMPLETED" "$TOTAL" "$BS"
+        SKIPPED+=("$BS")
+        continue
+    fi
+
     echo "┌─────────────────────────────────────────────────────────────────"
     printf "│ \033[1m[%d/%d] Tuning batch_size=%s\033[0m\n" "$COMPLETED" "$TOTAL" "$BS"
     echo "└─────────────────────────────────────────────────────────────────"
@@ -159,6 +182,11 @@ for BS in "${BATCH_SIZES[@]}"; do
 
     post_round
 done
+
+if [[ ${#SKIPPED[@]} -gt 0 ]]; then
+    echo "  ⏭ Skipped ${#SKIPPED[@]} already-tuned batch size(s): ${SKIPPED[*]}"
+    echo
+fi
 
 TUNING_ELAPSED=$(( SECONDS - TUNING_START ))
 

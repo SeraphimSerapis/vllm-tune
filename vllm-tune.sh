@@ -736,6 +736,7 @@ fi
 if ! $DRY_RUN; then
     META_FILE="$MODEL_DIR/metadata.json"
     VLLM_VERSION=$(docker exec "$CONTAINER" python3 -c "import vllm; print(vllm.__version__)" 2>/dev/null || echo "unknown")
+    TRITON_VERSION=$(docker exec "$CONTAINER" python3 -c "import triton; print(triton.__version__)" 2>/dev/null || echo "unknown")
     cat > "$META_FILE" <<EOF
 {
     "model": "$MODEL",
@@ -746,6 +747,7 @@ if ! $DRY_RUN; then
     "container": "$CONTAINER",
     "mode": "$MODE",
     "vllm_version": "$VLLM_VERSION",
+    "triton_version": "$TRITON_VERSION",
     "moe_configs": $(find "$CONFIGS_MOE" -name '*.json' 2>/dev/null | wc -l),
     "fp8_configs": $(find "$CONFIGS_FP8" -name '*.json' 2>/dev/null | wc -l)
 }
