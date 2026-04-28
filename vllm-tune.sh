@@ -21,6 +21,8 @@ set -euo pipefail
 #   -t, --target <NAME>   Container name (default: vllm_node)
 #   --deploy              Deploy configs to container after tuning
 #   --deploy-only         Skip tuning, just deploy existing configs
+#   --export-sparkrun     Copy configs to sparkrun's tuning cache
+#   --import-sparkrun     Import configs from sparkrun's tuning cache
 #   --attach              Attach to existing tmux tuning session
 #   --foreground          Run in foreground instead of tmux
 #   --sync-mod            Sync configs back to vllm-tune mod dir
@@ -33,6 +35,8 @@ set -euo pipefail
 #   vllm-tune.sh Qwen/Qwen3.6-35B-A3B-FP8 --mode moe
 #   vllm-tune.sh --attach                     # reattach to session
 #   vllm-tune.sh Qwen/Qwen3.6-35B-A3B-FP8 --deploy-only -t vllm_node
+#   vllm-tune.sh Qwen/Qwen3.6-35B-A3B-FP8 --export-sparkrun
+#   vllm-tune.sh Qwen/Qwen3.6-35B-A3B-FP8 --import-sparkrun --tp 2
 #
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -76,6 +80,9 @@ ATTACH_ONLY=false
 SYNC_MOD=false
 FORCE_SETUP=false
 MOD_DIR_OVERRIDE=""
+EXPORT_SPARKRUN=false
+IMPORT_SPARKRUN=false
+SPARKRUN_TUNING_DIR="${SPARKRUN_TUNING_DIR:-$HOME/.cache/sparkrun/tuning/vllm}"
 DRY_RUN=false
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -124,6 +131,9 @@ while [[ $# -gt 0 ]]; do
         --tmux)         USE_TMUX=true; shift ;;  # back-compat (now default)
         --sync-mod)     SYNC_MOD=true; shift ;;
         --mod-dir)      MOD_DIR_OVERRIDE="$2"; shift 2 ;;
+        --export-sparkrun)  EXPORT_SPARKRUN=true; shift ;;
+        --import-sparkrun)  IMPORT_SPARKRUN=true; shift ;;
+        --sparkrun-dir) SPARKRUN_TUNING_DIR="$2"; shift 2 ;;
         --setup)        FORCE_SETUP=true; shift ;;
         --dry-run)      DRY_RUN=true; shift ;;
         --batch-size)
@@ -170,6 +180,110 @@ MODEL_DIR="$CONFIG_HOME/$SLUG/tp${TP}"
 CONFIGS_MOE="$MODEL_DIR/moe"
 CONFIGS_FP8="$MODEL_DIR/fp8"
 REPORT_DIR="$CONFIG_HOME/reports"
+
+# ── sparkrun export/import (early exit) ─────────────────────────────
+
+if $EXPORT_SPARKRUN; then
+    show_banner
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  Export to sparkrun"
+    echo "  Model:  $MODEL (tp$TP)"
+    echo "  Source: $MODEL_DIR/"
+    echo "  Target: $SPARKRUN_TUNING_DIR/"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo
+
+    exported=0
+
+    if [[ "$MODE" == "all" || "$MODE" == "moe" ]]; then
+        if compgen -G "$CONFIGS_MOE/*.json" > /dev/null 2>&1; then
+            if $DRY_RUN; then
+                echo "  [dry-run] Would copy MoE configs:"
+                for f in "$CONFIGS_MOE"/*.json; do echo "    $(basename "$f")"; done
+            else
+                mkdir -p "$SPARKRUN_TUNING_DIR"
+                cp -v "$CONFIGS_MOE"/*.json "$SPARKRUN_TUNING_DIR/" 2>&1 | sed 's/^/    /'
+            fi
+            exported=$((exported + $(ls -1 "$CONFIGS_MOE"/*.json 2>/dev/null | wc -l)))
+        else
+            warn "No MoE configs in $CONFIGS_MOE"
+        fi
+    fi
+
+    if [[ "$MODE" == "all" || "$MODE" == "fp8" ]]; then
+        if compgen -G "$CONFIGS_FP8/*.json" > /dev/null 2>&1; then
+            if $DRY_RUN; then
+                echo "  [dry-run] Would copy FP8 configs:"
+                for f in "$CONFIGS_FP8"/*.json; do echo "    $(basename "$f")"; done
+            else
+                mkdir -p "$SPARKRUN_TUNING_DIR"
+                cp -v "$CONFIGS_FP8"/*.json "$SPARKRUN_TUNING_DIR/" 2>&1 | sed 's/^/    /'
+            fi
+            exported=$((exported + $(ls -1 "$CONFIGS_FP8"/*.json 2>/dev/null | wc -l)))
+        else
+            warn "No FP8 configs in $CONFIGS_FP8"
+        fi
+    fi
+
+    echo
+    if [[ $exported -gt 0 ]]; then
+        ok "Exported $exported config(s) to sparkrun tuning cache"
+        echo "  sparkrun will auto-mount these on next 'sparkrun run' via VLLM_TUNED_CONFIG_FOLDER."
+    else
+        warn "No configs found to export."
+    fi
+    exit 0
+fi
+
+if $IMPORT_SPARKRUN; then
+    show_banner
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  Import from sparkrun"
+    echo "  Source: $SPARKRUN_TUNING_DIR/"
+    echo "  Target: $MODEL_DIR/"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo
+
+    if [[ ! -d "$SPARKRUN_TUNING_DIR" ]]; then
+        echo "Error: sparkrun tuning directory not found: $SPARKRUN_TUNING_DIR" >&2
+        echo "  Run 'sparkrun tune vllm <recipe>' first, or set --sparkrun-dir." >&2
+        exit 1
+    fi
+
+    imported=0
+
+    # sparkrun stores all configs flat in one directory; classify by filename pattern
+    for cfg in "$SPARKRUN_TUNING_DIR"/*.json; do
+        [[ -f "$cfg" ]] || continue
+        name=$(basename "$cfg")
+
+        # MoE configs have E= in the filename, FP8 configs don't
+        if [[ "$name" == E=* ]]; then
+            [[ "$MODE" == "all" || "$MODE" == "moe" ]] || continue
+            dest="$CONFIGS_MOE"
+        else
+            [[ "$MODE" == "all" || "$MODE" == "fp8" ]] || continue
+            dest="$CONFIGS_FP8"
+        fi
+
+        if $DRY_RUN; then
+            echo "  [dry-run] Would import: $name → $dest/"
+        else
+            mkdir -p "$dest"
+            cp -v "$cfg" "$dest/$name" 2>&1 | sed 's/^/    /'
+        fi
+        imported=$((imported + 1))
+    done
+
+    echo
+    if [[ $imported -gt 0 ]]; then
+        ok "Imported $imported config(s) from sparkrun tuning cache"
+        echo "  Deploy with: vllm-tune.sh $MODEL --tp $TP --deploy-only"
+    else
+        warn "No matching configs found in $SPARKRUN_TUNING_DIR"
+    fi
+    exit 0
+fi
 
 # ── tmux re-exec ────────────────────────────────────────────────────
 
