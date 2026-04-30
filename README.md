@@ -85,15 +85,20 @@ vLLM-Tune runs tuning benchmarks **inside a running vLLM container**. Before run
 | Flag | Description | Default |
 |------|-------------|---------|
 | `--tp <N>` | Tensor parallelism size | `2` |
-| `--mode <MODE>` | `moe`, `fp8`, or `all` | `all` |
+| `--mode <MODE>` | `moe`, `fp8`, or `all` (auto-skips MoE for dense models) | `all` |
 | `--batch-size <S...>` | Custom batch sizes | 1–4096 (18 sizes) |
 | `--shapes <N,K ...>` | Explicit FP8 shapes | auto-detected |
 | `--dtype <DTYPE>` | MoE dtype | `fp8_w8a8` |
 | `-t, --target <NAME>` | Container name | `vllm_node` |
 | `--deploy` | Deploy configs after tuning | off |
 | `--deploy-only` | Skip tuning, deploy existing | off |
-| `--tmux` | Run in detachable tmux session | off |
+| `--standalone` | Launch a dedicated tuning container (no inference needed) | off |
+| `--image <IMAGE>` | Container image for `--standalone` | auto-detect |
+| `--foreground` | Run in foreground instead of tmux | off |
+| `--tmux` | Run in detachable tmux session | **on** (default) |
 | `--sync-mod` | Sync to vllm-tune mod dir | off |
+| `--export-sparkrun` | Copy configs to sparkrun's tuning cache | off |
+| `--import-sparkrun` | Import configs from sparkrun's tuning cache | off |
 | `--dry-run` | Show plan without executing | off |
 
 ## Config Store Layout
