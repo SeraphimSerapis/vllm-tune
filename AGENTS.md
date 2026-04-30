@@ -46,11 +46,12 @@ vllm-tune.sh                ← Main entry point (orchestrator)
 
 | File | Role | Modifiable in isolation? |
 |------|------|-------------------------|
-| `vllm-tune.sh` | CLI parsing, tmux, deploy, mod sync, metadata | Yes |
+| `vllm-tune.sh` | CLI parsing, tmux, deploy, mod sync, arch detection, metadata | Yes |
 | `tune-moe.sh` | MoE benchmark loop (calls `benchmark_moe.py` via git sparse-checkout) | Yes |
 | `tune-fp8.sh` | FP8 benchmark loop (inline Python Triton benchmark) | Yes |
 | `lib/common.sh` | Shared functions (MUST be updated if changing retry/merge/report behavior) | Careful — sourced by both tune scripts |
 | `mod/run.sh` | Runs inside container at startup — copies JSON configs into vLLM paths | Yes |
+| `tests/test-vllm-tune.sh` | Offline test suite (no Docker/GPU required) | Yes |
 | `configs/` | JSON kernel configs — tracked in git, never auto-deleted | Append-only |
 
 ---
@@ -83,6 +84,21 @@ vllm-tune.sh                ← Main entry point (orchestrator)
 
 ## Common tasks
 
+### Architecture detection (MoE vs dense)
+
+`vllm-tune.sh` detects model architecture before dispatching to `tune-moe.sh`.
+This runs `get_config()` inside the container and checks `num_local_experts`.
+
+- **`--mode all` + dense model**: MoE phase is skipped with informative message,
+  FP8 tuning proceeds normally
+- **`--mode moe` + dense model**: Clear error with suggestion to use `--mode fp8`
+- **`--dry-run`**: Detection is skipped (no container needed)
+- **Detection failure**: Falls back to `IS_MOE=false` (safe default — skips MoE)
+
+The detection code lives in `vllm-tune.sh` near the `# Architecture detection`
+comment block. It does NOT modify `tune-moe.sh` — the gating is an
+orchestration concern.
+
 ### Adding support for a new tuning mode
 
 If vLLM adds a new kernel type that benefits from tuning:
@@ -92,6 +108,7 @@ If vLLM adds a new kernel type that benefits from tuning:
 3. Add a new `--mode <type>` option to `vllm-tune.sh`
 4. Add a `CONFIGS_<TYPE>` path and deploy target in `deploy_all()`
 5. Update `mod/run.sh` to install the new config type
+6. Add tests to `tests/test-vllm-tune.sh`
 
 ### Adding pre-shipped configs for a new model
 
@@ -155,6 +172,27 @@ fails. If vLLM changes its internal config directory structure, update:
 ---
 
 ## Testing
+
+### Automated test suite
+
+```bash
+# Run the full offline test suite (no Docker/GPU required):
+./tests/test-vllm-tune.sh
+```
+
+The test suite covers:
+- Version and help output
+- Argument validation (missing model, invalid mode, unknown flags)
+- Model slug generation
+- Dry-run flow (mode selection, phase headers, flag passthrough)
+- Config path construction
+- Architecture detection gating (code presence, message text)
+- Script syntax validation (all `.sh` files)
+- Documentation checks (README + AGENTS.md)
+
+Tests exit with code 0 on success, non-zero on failure.
+
+### Manual testing
 
 ```bash
 # Dry-run (no container needed for basic flow):

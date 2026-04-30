@@ -21,6 +21,10 @@ set -euo pipefail
 #   -t, --target <NAME>   Container name (default: vllm_node)
 #   --deploy              Deploy configs to container after tuning
 #   --deploy-only         Skip tuning, just deploy existing configs
+#   --standalone          Launch a dedicated tuning container (no inference needed)
+#   --image <IMAGE>       Container image for --standalone (default: auto-detect)
+#   --export-sparkrun     Copy configs to sparkrun's tuning cache
+#   --import-sparkrun     Import configs from sparkrun's tuning cache
 #   --attach              Attach to existing tmux tuning session
 #   --foreground          Run in foreground instead of tmux
 #   --sync-mod            Sync configs back to vllm-tune mod dir
@@ -33,11 +37,15 @@ set -euo pipefail
 #   vllm-tune.sh Qwen/Qwen3.6-35B-A3B-FP8 --mode moe
 #   vllm-tune.sh --attach                     # reattach to session
 #   vllm-tune.sh Qwen/Qwen3.6-35B-A3B-FP8 --deploy-only -t vllm_node
+#   vllm-tune.sh Qwen/Qwen3.6-35B-A3B-FP8 --standalone
+#   vllm-tune.sh Qwen/Qwen3.6-35B-A3B-FP8 --standalone --image my-vllm:latest
+#   vllm-tune.sh Qwen/Qwen3.6-35B-A3B-FP8 --export-sparkrun
+#   vllm-tune.sh Qwen/Qwen3.6-35B-A3B-FP8 --import-sparkrun --tp 2
 #
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TUNE_SCRIPTS_DIR="${TUNE_SCRIPTS_DIR:-$SCRIPT_DIR}"
-VERSION="0.1.3"
+VERSION="0.1.4"
 
 # Source shared library (config helpers, etc.)
 source "$SCRIPT_DIR/lib/common.sh"
@@ -76,6 +84,12 @@ ATTACH_ONLY=false
 SYNC_MOD=false
 FORCE_SETUP=false
 MOD_DIR_OVERRIDE=""
+STANDALONE=false
+STANDALONE_IMAGE=""
+STANDALONE_CONTAINER=""
+EXPORT_SPARKRUN=false
+IMPORT_SPARKRUN=false
+SPARKRUN_TUNING_DIR="${SPARKRUN_TUNING_DIR:-$HOME/.cache/sparkrun/tuning/vllm}"
 DRY_RUN=false
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -124,6 +138,11 @@ while [[ $# -gt 0 ]]; do
         --tmux)         USE_TMUX=true; shift ;;  # back-compat (now default)
         --sync-mod)     SYNC_MOD=true; shift ;;
         --mod-dir)      MOD_DIR_OVERRIDE="$2"; shift 2 ;;
+        --standalone)    STANDALONE=true; shift ;;
+        --image)         STANDALONE_IMAGE="$2"; shift 2 ;;
+        --export-sparkrun)  EXPORT_SPARKRUN=true; shift ;;
+        --import-sparkrun)  IMPORT_SPARKRUN=true; shift ;;
+        --sparkrun-dir) SPARKRUN_TUNING_DIR="$2"; shift 2 ;;
         --setup)        FORCE_SETUP=true; shift ;;
         --dry-run)      DRY_RUN=true; shift ;;
         --batch-size)
@@ -171,11 +190,192 @@ CONFIGS_MOE="$MODEL_DIR/moe"
 CONFIGS_FP8="$MODEL_DIR/fp8"
 REPORT_DIR="$CONFIG_HOME/reports"
 
+# ── sparkrun export/import (early exit) ─────────────────────────────
+
+if $EXPORT_SPARKRUN; then
+    show_banner
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  Export to sparkrun"
+    echo "  Model:  $MODEL (tp$TP)"
+    echo "  Source: $MODEL_DIR/"
+    echo "  Target: $SPARKRUN_TUNING_DIR/"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo
+
+    exported=0
+
+    if [[ "$MODE" == "all" || "$MODE" == "moe" ]]; then
+        if compgen -G "$CONFIGS_MOE/*.json" > /dev/null 2>&1; then
+            if $DRY_RUN; then
+                echo "  [dry-run] Would copy MoE configs:"
+                for f in "$CONFIGS_MOE"/*.json; do echo "    $(basename "$f")"; done
+            else
+                mkdir -p "$SPARKRUN_TUNING_DIR"
+                cp -v "$CONFIGS_MOE"/*.json "$SPARKRUN_TUNING_DIR/" 2>&1 | sed 's/^/    /'
+            fi
+            exported=$((exported + $(ls -1 "$CONFIGS_MOE"/*.json 2>/dev/null | wc -l)))
+        else
+            warn "No MoE configs in $CONFIGS_MOE"
+        fi
+    fi
+
+    if [[ "$MODE" == "all" || "$MODE" == "fp8" ]]; then
+        if compgen -G "$CONFIGS_FP8/*.json" > /dev/null 2>&1; then
+            if $DRY_RUN; then
+                echo "  [dry-run] Would copy FP8 configs:"
+                for f in "$CONFIGS_FP8"/*.json; do echo "    $(basename "$f")"; done
+            else
+                mkdir -p "$SPARKRUN_TUNING_DIR"
+                cp -v "$CONFIGS_FP8"/*.json "$SPARKRUN_TUNING_DIR/" 2>&1 | sed 's/^/    /'
+            fi
+            exported=$((exported + $(ls -1 "$CONFIGS_FP8"/*.json 2>/dev/null | wc -l)))
+        else
+            warn "No FP8 configs in $CONFIGS_FP8"
+        fi
+    fi
+
+    echo
+    if [[ $exported -gt 0 ]]; then
+        ok "Exported $exported config(s) to sparkrun tuning cache"
+        echo "  sparkrun will auto-mount these on next 'sparkrun run' via VLLM_TUNED_CONFIG_FOLDER."
+    else
+        warn "No configs found to export."
+    fi
+    exit 0
+fi
+
+if $IMPORT_SPARKRUN; then
+    show_banner
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  Import from sparkrun"
+    echo "  Source: $SPARKRUN_TUNING_DIR/"
+    echo "  Target: $MODEL_DIR/"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo
+
+    if [[ ! -d "$SPARKRUN_TUNING_DIR" ]]; then
+        echo "Error: sparkrun tuning directory not found: $SPARKRUN_TUNING_DIR" >&2
+        echo "  Run 'sparkrun tune vllm <recipe>' first, or set --sparkrun-dir." >&2
+        exit 1
+    fi
+
+    imported=0
+
+    # sparkrun stores all configs flat in one directory; classify by filename pattern
+    for cfg in "$SPARKRUN_TUNING_DIR"/*.json; do
+        [[ -f "$cfg" ]] || continue
+        name=$(basename "$cfg")
+
+        # MoE configs have E= in the filename, FP8 configs don't
+        if [[ "$name" == E=* ]]; then
+            [[ "$MODE" == "all" || "$MODE" == "moe" ]] || continue
+            dest="$CONFIGS_MOE"
+        else
+            [[ "$MODE" == "all" || "$MODE" == "fp8" ]] || continue
+            dest="$CONFIGS_FP8"
+        fi
+
+        if $DRY_RUN; then
+            echo "  [dry-run] Would import: $name → $dest/"
+        else
+            mkdir -p "$dest"
+            cp -v "$cfg" "$dest/$name" 2>&1 | sed 's/^/    /'
+        fi
+        imported=$((imported + 1))
+    done
+
+    echo
+    if [[ $imported -gt 0 ]]; then
+        ok "Imported $imported config(s) from sparkrun tuning cache"
+        echo "  Deploy with: vllm-tune.sh $MODEL --tp $TP --deploy-only"
+    else
+        warn "No matching configs found in $SPARKRUN_TUNING_DIR"
+    fi
+    exit 0
+fi
+
 # ── tmux re-exec ────────────────────────────────────────────────────
 
 # Skip tmux for quick operations or when already inside a tmux re-exec
 if $DEPLOY_ONLY || $DRY_RUN || [[ "${_VLLM_TUNE_INSIDE_TMUX:-}" == "1" ]]; then
     USE_TMUX=false
+fi
+
+# ── Standalone container launch ─────────────────────────────────────
+# Launch a dedicated tuning container so no running inference is needed.
+# The container uses `sleep infinity` — GPU is only used during benchmarks.
+
+# Auto-detect image from a running container or --image flag.
+_resolve_standalone_image() {
+    # Explicit --image always wins
+    if [[ -n "$STANDALONE_IMAGE" ]]; then
+        echo "$STANDALONE_IMAGE"
+        return
+    fi
+    # Try to detect from a running inference container
+    local detected
+    detected=$(docker inspect --format '{{.Config.Image}}' "$CONTAINER" 2>/dev/null || true)
+    if [[ -n "$detected" ]]; then
+        echo "$detected"
+        return
+    fi
+    # Check config.json
+    local cfg_image
+    cfg_image=$(cfg_get image)
+    if [[ -n "$cfg_image" ]]; then
+        echo "$cfg_image"
+        return
+    fi
+    return 1
+}
+
+# Clean up standalone container on exit/error/signal.
+_cleanup_standalone() {
+    if [[ -n "${STANDALONE_CONTAINER:-}" ]]; then
+        echo
+        info "Cleaning up standalone tuning container: $STANDALONE_CONTAINER"
+        docker stop "$STANDALONE_CONTAINER" >/dev/null 2>&1 || true
+        docker rm -f "$STANDALONE_CONTAINER" >/dev/null 2>&1 || true
+    fi
+}
+
+if $STANDALONE && ! $DRY_RUN; then
+    IMAGE=$(_resolve_standalone_image) || \
+        die "Cannot determine container image for --standalone.\n  Pass --image <IMAGE> or have a running '$CONTAINER' to detect from."
+
+    STANDALONE_CONTAINER="vllm_tune_${SLUG:0:30}"
+
+    # Remove stale container with same name
+    if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "$STANDALONE_CONTAINER"; then
+        info "Removing stale tuning container: $STANDALONE_CONTAINER"
+        docker rm -f "$STANDALONE_CONTAINER" >/dev/null 2>&1 || true
+    fi
+
+    # Detect HuggingFace cache for model weights
+    HF_CACHE="${HF_HOME:-${HUGGING_FACE_HUB_TOKEN:+$HOME/.cache/huggingface}}"
+    HF_CACHE="${HF_CACHE:-$HOME/.cache/huggingface}"
+
+    info "Launching standalone tuning container..."
+    info "  Image:     $IMAGE"
+    info "  Container: $STANDALONE_CONTAINER"
+    info "  HF cache:  $HF_CACHE"
+
+    docker run -d \
+        --name "$STANDALONE_CONTAINER" \
+        --gpus all \
+        --ipc host \
+        --ulimit memlock=-1 \
+        -v "$HF_CACHE:/root/.cache/huggingface" \
+        "$IMAGE" \
+        sleep infinity >/dev/null
+
+    # Register cleanup trap (covers EXIT, INT, TERM, ERR)
+    trap _cleanup_standalone EXIT
+
+    # Override CONTAINER so all subsequent tuning runs against the standalone
+    CONTAINER="$STANDALONE_CONTAINER"
+    ok "Standalone tuning container ready"
+    echo
 fi
 
 # Pre-check: fail fast if container isn't running (before spawning tmux)
@@ -185,8 +385,7 @@ if ! $DRY_RUN; then
         echo "  Error: No running container named '$CONTAINER'." >&2
         echo "" >&2
         echo "  vLLM-Tune needs a running vLLM container to tune kernels inside." >&2
-        echo "  Start one first, e.g.:" >&2
-        echo "    launch-cluster.sh ...    # spark-vllm-docker" >&2
+        echo "  Start one first, or use --standalone to launch a tuning container." >&2
         echo "" >&2
         if [[ "$CONTAINER" == "vllm_node" ]]; then
             echo "  Using a different container name? Pass -t <name>" >&2
@@ -204,6 +403,10 @@ if $USE_TMUX; then
     [[ ${#BATCH_SIZES[@]} -gt 0 ]] && REEXEC_ARGS+=(--batch-size "${BATCH_SIZES[@]}")
     [[ ${#SHAPES[@]} -gt 0 ]] && REEXEC_ARGS+=(--shapes "${SHAPES[@]}")
     $DO_DEPLOY && REEXEC_ARGS+=(--deploy)
+    if $STANDALONE; then
+        REEXEC_ARGS+=(--standalone)
+        [[ -n "$STANDALONE_IMAGE" ]] && REEXEC_ARGS+=(--image "$STANDALONE_IMAGE")
+    fi
     if $SYNC_MOD; then
         REEXEC_ARGS+=(--sync-mod)
         [[ -n "$MOD_DIR_OVERRIDE" ]] && REEXEC_ARGS+=(--mod-dir "$MOD_DIR_OVERRIDE")
@@ -332,6 +535,22 @@ TUNING_START=$SECONDS
 MOE_OK=false
 FP8_OK=false
 
+# ── Architecture detection ──────────────────────────────────────────
+# Detect whether model uses Mixture-of-Experts (MoE) or is a dense
+# transformer. This determines whether MoE tuning is applicable.
+
+IS_MOE=false
+if [[ "$MODE" == "all" || "$MODE" == "moe" ]] && ! $DRY_RUN; then
+    _arch_result=$(docker exec "$CONTAINER" python3 -c "
+from vllm.transformers_utils.config import get_config
+config = get_config(model='$MODEL', trust_remote_code=True)
+tc = getattr(config, 'text_config', config)
+E = getattr(tc, 'num_local_experts', None)
+print('moe' if E and int(E) > 0 else 'dense')
+" 2>/dev/null) || _arch_result="unknown"
+    [[ "$_arch_result" == "moe" ]] && IS_MOE=true
+fi
+
 # ── MoE tuning ──────────────────────────────────────────────────────
 
 if [[ "$MODE" == "all" || "$MODE" == "moe" ]]; then
@@ -339,16 +558,35 @@ if [[ "$MODE" == "all" || "$MODE" == "moe" ]]; then
     printf "│ \033[1mPhase 1: MoE Kernel Tuning\033[0m\n"
     echo "└─────────────────────────────────────────────────────────────────"
 
-    MOE_SCRIPT="$TUNE_SCRIPTS_DIR/tune-moe.sh"
-    [[ -x "$MOE_SCRIPT" ]] || die "MoE tuning script not found: $MOE_SCRIPT"
-
-    if $DRY_RUN; then
-        echo "  [dry-run] $MOE_SCRIPT $MODEL --tp $TP --dtype $DTYPE ${BS_ARGS[*]+${BS_ARGS[*]}}"
+    if ! $IS_MOE && ! $DRY_RUN; then
+        if [[ "$MODE" == "moe" ]]; then
+            # User explicitly requested MoE-only on a dense model
+            echo "  ❌ $MODEL is a dense model — MoE tuning is not applicable."
+            echo "     MoE tuning requires models with mixture-of-experts layers"
+            echo "     (e.g., Qwen-A3B, Mixtral, DeepSeek-V2)."
+            echo ""
+            echo "  💡 For dense FP8 models, use:"
+            echo "       vllm-tune.sh $MODEL --mode fp8 --tp $TP"
+            exit 1
+        else
+            # --mode all: gracefully skip MoE, continue with FP8
+            echo "  ⏭ $MODEL is a dense model — skipping MoE tuning (no expert layers)"
+            echo "  → Proceeding directly to FP8 dense GEMM tuning"
+            echo ""
+            MOE_OK=true  # Not a failure, just not applicable
+        fi
     else
-        CONFIGS_DIR="$CONFIGS_MOE" \
-        HOST_BACKUP_DIR="$CONFIG_HOME/backups/$SLUG/moe" \
-        CONTAINER="$CONTAINER" \
-        "$MOE_SCRIPT" "$MODEL" --tp "$TP" --dtype "$DTYPE" ${BS_ARGS[@]+"${BS_ARGS[@]}"} && MOE_OK=true || true
+        MOE_SCRIPT="$TUNE_SCRIPTS_DIR/tune-moe.sh"
+        [[ -x "$MOE_SCRIPT" ]] || die "MoE tuning script not found: $MOE_SCRIPT"
+
+        if $DRY_RUN; then
+            echo "  [dry-run] $MOE_SCRIPT $MODEL --tp $TP --dtype $DTYPE ${BS_ARGS[*]+${BS_ARGS[*]}}"
+        else
+            CONFIGS_DIR="$CONFIGS_MOE" \
+            HOST_BACKUP_DIR="$CONFIG_HOME/backups/$SLUG/moe" \
+            CONTAINER="$CONTAINER" \
+            "$MOE_SCRIPT" "$MODEL" --tp "$TP" --dtype "$DTYPE" ${BS_ARGS[@]+"${BS_ARGS[@]}"} && MOE_OK=true || true
+        fi
     fi
     echo
 fi
@@ -533,6 +771,7 @@ fi
 if ! $DRY_RUN; then
     META_FILE="$MODEL_DIR/metadata.json"
     VLLM_VERSION=$(docker exec "$CONTAINER" python3 -c "import vllm; print(vllm.__version__)" 2>/dev/null || echo "unknown")
+    TRITON_VERSION=$(docker exec "$CONTAINER" python3 -c "import triton; print(triton.__version__)" 2>/dev/null || echo "unknown")
     cat > "$META_FILE" <<EOF
 {
     "model": "$MODEL",
@@ -543,6 +782,7 @@ if ! $DRY_RUN; then
     "container": "$CONTAINER",
     "mode": "$MODE",
     "vllm_version": "$VLLM_VERSION",
+    "triton_version": "$TRITON_VERSION",
     "moe_configs": $(find "$CONFIGS_MOE" -name '*.json' 2>/dev/null | wc -l),
     "fp8_configs": $(find "$CONFIGS_FP8" -name '*.json' 2>/dev/null | wc -l)
 }
