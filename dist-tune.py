@@ -226,6 +226,37 @@ def check_already_tuned(model, tp, mode, batch_sizes, shapes):
     return tuned_moe, pending_moe, tuned_fp8, pending_fp8
 
 
+def merge_moe_configs(node_configs_dir, local_configs_dir):
+    """Deep merge retrieved MoE configs into the master local configs."""
+    node_configs_path = Path(node_configs_dir)
+    local_configs_path = Path(local_configs_dir)
+    
+    # MoE configs are in model/tpX/moe/*.json
+    for node_file in node_configs_path.glob("**/*.json"):
+        rel_path = node_file.relative_to(node_configs_path)
+        local_file = local_configs_path / rel_path
+        
+        if local_file.exists():
+            try:
+                with open(node_file, 'r') as f:
+                    node_data = json.load(f)
+                with open(local_file, 'r') as f:
+                    local_data = json.load(f)
+                
+                # Merge batch size keys
+                local_data.update(node_data)
+                
+                with open(local_file, 'w') as f:
+                    json.dump(local_data, f, indent=4)
+                    f.write('\n')
+            except Exception as e:
+                log_orchestrator(f"⚠️  Merge error for {rel_path}: {e}")
+        else:
+            # New file or FP8 file
+            local_file.parent.mkdir(parents=True, exist_ok=True)
+            import shutil
+            shutil.copy2(node_file, local_file)
+
 def worker(node, local_ip, task_queue, extra_args, stats):
     is_remote = node not in [local_ip, "127.0.0.1", "localhost"]
     
@@ -318,11 +349,15 @@ def worker(node, local_ip, task_queue, extra_args, stats):
                 node_states[node]['status'] = f'Failed {task_type.upper()} {arg}'
 
         if is_remote and not shutdown_requested:
-            os.makedirs("/home/llm/vllm-tune/configs/", exist_ok=True)
+            tmp_dir = f"/home/llm/vllm-tune/configs/.tmp_{node.replace('.', '_')}"
+            os.makedirs(tmp_dir, exist_ok=True)
             subprocess.run(
-                f"rsync -avz -e 'ssh -o StrictHostKeyChecking=no' {node}:/home/llm/vllm-tune/configs/ /home/llm/vllm-tune/configs/ >/dev/null 2>&1", 
+                f"rsync -avz -e 'ssh -o StrictHostKeyChecking=no' {node}:/home/llm/vllm-tune/configs/ {tmp_dir}/ >/dev/null 2>&1", 
                 shell=True
             )
+            merge_moe_configs(tmp_dir, "/home/llm/vllm-tune/configs/")
+            import shutil
+            shutil.rmtree(tmp_dir)
 
         task_queue.task_done()
     
