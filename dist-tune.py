@@ -40,43 +40,58 @@ def log_orchestrator(msg):
         orchestrator_logs.append(msg)
 
 def remote_cleanup(nodes):
-    """Surgically kill tuning processes on all nodes."""
-    log_orchestrator("[bold red]🧹 Surgically cleaning up remote tuning processes...[/bold red]")
-    # Kill the tuning scripts and the specific benchmark worker
+    """Surgically kill tuning processes on all nodes concurrently."""
+    print("\n[Orchestrator] 🧹 Surgically cleaning up remote tuning processes (please wait)...")
+    # 1. Kill the container payload first (gracefully) using bracket regex to avoid pkill matching itself
+    # 2. Sleep briefly to let the parent script reap the child and avoid zombies
+    # 3. Then kill the parent tuning scripts
     cleanup_cmd = (
-        "pkill -9 -f 'vllm-tune.sh|tune-moe.sh|tune-fp8.sh' || true; "
-        "docker exec vllm_node pkill -9 -f 'ray::BenchmarkWorker.tune|benchmark_moe.py' || true"
+        "docker exec vllm_node pkill -15 -f '[r]ay::BenchmarkWorker|[b]enchmark_moe.py' || true; "
+        "sleep 1; "
+        "pkill -15 -f '[t]une-moe.sh|[t]une-fp8.sh' || true"
     )
+
+    env_nodes, local_ip = get_nodes()
+    cleanup_procs = []
+    
     for node in nodes:
-        is_remote = node not in ["127.0.0.1", "localhost"]
-        # Also check if it's the local IP
-        env_nodes, local_ip = get_nodes()
-        if node == local_ip: is_remote = False
-        
+        is_remote = node not in ["127.0.0.1", "localhost", local_ip]
         if is_remote:
-            subprocess.run(f"ssh -n -o StrictHostKeyChecking=no {node} {shlex.quote(cleanup_cmd)}", shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            p = subprocess.Popen(["ssh", "-n", "-o", "StrictHostKeyChecking=no", node, cleanup_cmd], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         else:
-            subprocess.run(cleanup_cmd, shell=True, stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+            p = subprocess.Popen(cleanup_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        cleanup_procs.append((node, p))
+        
+    for node, p in cleanup_procs:
+        out, _ = p.communicate()
+        if out.strip():
+            print(f"[Orchestrator] ℹ️  Cleanup output from {node}:\n{out.decode('utf-8', errors='ignore')}")
+            
+    print("[Orchestrator] ✅ Cleanup complete.")
 
 def signal_handler(sig, frame):
     global shutdown_requested, ctrl_c_count
     ctrl_c_count += 1
     if ctrl_c_count == 1:
         shutdown_requested = True
-        log_orchestrator("[bold yellow]⚠️  Ctrl-C detected. Waiting for current tasks to finish...[/bold yellow]")
-        log_orchestrator("[bold yellow]⚠️  Press Ctrl-C again to FORCE KILL everything.[/bold yellow]")
-    else:
-        # We can't easily use log_orchestrator here if we are about to exit, 
-        # but let's try to print at least.
-        print("\n[Orchestrator] 💀 Forcefully terminating all tuning processes...")
+        print("\n[Orchestrator] ⚠️  Ctrl-C detected. Purging cluster and terminating local tasks...")
+        
+        # 1. Kill local worker processes to free up threads (gracefully)
         with procs_lock:
             for p in active_procs:
                 try:
-                    os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+                    os.killpg(os.getpgid(p.pid), signal.SIGTERM)
                 except Exception:
                     pass
+                    
+        # 2. Aggressively purge remote nodes concurrently
         remote_cleanup(nodes_list)
-        sys.exit(1)
+        
+        print("[Orchestrator] 💀 Exiting.")
+        os._exit(1)
+    else:
+        print("\n[Orchestrator] 💀 Force exit requested. Bypassing cleanup.")
+        os._exit(1)
 
 signal.signal(signal.SIGINT, signal_handler)
 
