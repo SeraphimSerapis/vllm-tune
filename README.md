@@ -97,6 +97,7 @@ vLLM-Tune runs tuning benchmarks **inside a running vLLM container**. Before run
 | `--foreground` | Run in foreground instead of tmux | off |
 | `--tmux` | Run in detachable tmux session | **on** (default) |
 | `--sync-mod` | Sync to vllm-tune mod dir | off |
+| `--dist` | Distributed tuning across the cluster | off |
 | `--export-sparkrun` | Copy configs to sparkrun's tuning cache | off |
 | `--import-sparkrun` | Import configs from sparkrun's tuning cache | off |
 | `--dry-run` | Show plan without executing | off |

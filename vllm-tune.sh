@@ -11,6 +11,7 @@ set -euo pipefail
 # Usage:
 #   vllm-tune.sh <MODEL_ID> [options]
 #   vllm-tune.sh --attach [MODEL_ID]     Attach to a running tuning session
+#   vllm-tune.sh <MODEL_ID> --dist       Distributed tuning across cluster
 #
 # Options:
 #   --tp <N>              Tensor parallelism (default: 2)
@@ -19,6 +20,7 @@ set -euo pipefail
 #   --shapes <N,K ...>    Explicit FP8 shapes (skip auto-detect)
 #   --dtype <DTYPE>       MoE dtype (default: fp8_w8a8)
 #   -t, --target <NAME>   Container name (default: vllm_node)
+#   --dist                Distributed tuning (requires dist-tune.py + .env)
 #   --deploy              Deploy configs to container after tuning
 #   --deploy-only         Skip tuning, just deploy existing configs
 #   --standalone          Launch a dedicated tuning container (no inference needed)
@@ -77,6 +79,7 @@ DTYPE=$(cfg_get dtype); DTYPE="${DTYPE:-fp8_w8a8}"
 CONTAINER=$(cfg_get container); CONTAINER="${CONTAINER:-vllm_node}"
 BATCH_SIZES=()
 SHAPES=()
+DISTRIBUTED=false
 DO_DEPLOY=false
 DEPLOY_ONLY=false
 USE_TMUX=true
@@ -131,6 +134,7 @@ while [[ $# -gt 0 ]]; do
         --mode)         MODE="$2"; shift 2 ;;
         --dtype)        DTYPE="$2"; shift 2 ;;
         -t|--target)    CONTAINER="$2"; shift 2 ;;
+        --dist)         DISTRIBUTED=true; shift ;;
         --deploy)       DO_DEPLOY=true; shift ;;
         --deploy-only)  DEPLOY_ONLY=true; shift ;;
         --attach)       ATTACH_ONLY=true; shift ;;
@@ -299,6 +303,51 @@ fi
 # Skip tmux for quick operations or when already inside a tmux re-exec
 if $DEPLOY_ONLY || $DRY_RUN || [[ "${_VLLM_TUNE_INSIDE_TMUX:-}" == "1" ]]; then
     USE_TMUX=false
+fi
+
+# ── Distributed mode re-exec ────────────────────────────────────────
+# This handles the case where we WANT to run dist-tune.py in a tmux session
+# OR in the foreground. It must happen BEFORE the local container checks.
+
+if $DISTRIBUTED && ! $DRY_RUN; then
+    if $USE_TMUX; then
+        command -v tmux &>/dev/null || die "tmux is required. Install it or use --foreground."
+        SESSION="vllm-tune_dist_${SLUG:0:25}"
+        
+        if tmux has-session -t "$SESSION" 2>/dev/null; then
+            show_banner
+            echo "  Distributed tuning session '$SESSION' is already running."
+            echo ""
+            echo "  Attach:  tmux attach -t $SESSION"
+            exit 0
+        fi
+
+        show_banner
+        echo "  Starting distributed tuning in tmux session: $SESSION"
+        
+        # Build the command to run INSIDE tmux
+        REEXEC_ARGS=("$MODEL" --tp "$TP" --mode "$MODE" --dtype "$DTYPE" --foreground --dist)
+        [[ ${#BATCH_SIZES[@]} -gt 0 ]] && REEXEC_ARGS+=(--batch-size "${BATCH_SIZES[@]}")
+        [[ ${#SHAPES[@]} -gt 0 ]] && REEXEC_ARGS+=(--shapes "${SHAPES[@]}")
+        
+        QUOTED_ARGS=""
+        for arg in "${REEXEC_ARGS[@]}"; do QUOTED_ARGS+=" $(printf '%q' "$arg")"; done
+        
+        _VLLM_TUNE_INSIDE_TMUX=1 tmux new-session -d -s "$SESSION" \
+            "$SCRIPT_DIR/vllm-tune.sh$QUOTED_ARGS; echo ''; echo 'Tuning complete. Press Enter to close.'; read"
+        echo ""
+        echo "  Attach:  tmux attach -t $SESSION"
+        echo "  Detach:  Ctrl-b d"
+        exit 0
+    fi
+
+    # Foreground distributed mode
+    show_banner
+    info "Launching Distributed Orchestrator (dist-tune.py)..."
+    echo ""
+    DIST_ARGS=("$MODEL" --tp "$TP" --mode "$MODE")
+    # Forward any other relevant flags if needed
+    exec python3 "$SCRIPT_DIR/dist-tune.py" "${DIST_ARGS[@]}"
 fi
 
 # ── Standalone container launch ─────────────────────────────────────
@@ -541,13 +590,7 @@ FP8_OK=false
 
 IS_MOE=false
 if [[ "$MODE" == "all" || "$MODE" == "moe" ]] && ! $DRY_RUN; then
-    _arch_result=$(docker exec "$CONTAINER" python3 -c "
-from vllm.transformers_utils.config import get_config
-config = get_config(model='$MODEL', trust_remote_code=True)
-tc = getattr(config, 'text_config', config)
-E = getattr(tc, 'num_local_experts', None)
-print('moe' if E and int(E) > 0 else 'dense')
-" 2>/dev/null) || _arch_result="unknown"
+    _arch_result=$(docker exec "$CONTAINER" python3 -c "$(cat "$SCRIPT_DIR/lib/detect.py")" "$MODEL" --mode arch 2>/dev/null | grep '^{' | jq -r '.arch' || echo "unknown")
     [[ "$_arch_result" == "moe" ]] && IS_MOE=true
 fi
 
