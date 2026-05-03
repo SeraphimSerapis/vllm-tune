@@ -480,7 +480,7 @@ def worker(node, local_ip, task_queue, args, stats, configs_root):
             log_orchestrator(f"✅ [bold]{node}[/bold] completed {label}")
             with ui_lock:
                 node_states[node]['status'] = f'Completed {label}'
-            stats['completed'] += 1
+                stats['completed'] += 1
         else:
             log_orchestrator(f"❌ [bold]{node}[/bold] failed {label}")
             with ui_lock:

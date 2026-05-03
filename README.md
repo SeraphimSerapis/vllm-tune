@@ -61,7 +61,7 @@ vLLM-Tune runs tuning benchmarks **inside a running vLLM container**. Before run
 1. A running vLLM Docker container (default name: `vllm_node`, override with `-t`)
    — e.g. launched via [spark-vllm-docker](https://github.com/eugr/spark-vllm-docker)'s `launch-cluster.sh`
 2. `jq` installed on the host
-3. `tmux` (optional, for `--tmux` detachable sessions)
+3. `tmux` (required by default — use `--foreground` to skip)
 4. `sudo` access (optional, for cache clearing between tuning rounds)
 
 ## Quick Start
@@ -157,6 +157,7 @@ The following tuned configs are included out of the box — no tuning required:
 | Model | TP | MoE configs | FP8 configs | Tuned on |
 |-------|-----|-------------|-------------|----------|
 | `Qwen/Qwen3.6-35B-A3B-FP8` | 2 | 2 (E=256, N=256/512) | 5 (dense GEMM shapes) | NVIDIA GB10 |
+| `Qwen/Qwen3.6-27B-FP8` | 2 | — (dense model) | 5 (dense GEMM shapes) | NVIDIA GB10 |
 
 To deploy them immediately:
 
@@ -264,7 +265,10 @@ VLLM_TUNED_CONFIG_FOLDER=/opt/vllm-tuned-configs
 | `CONTAINER` | Docker container name | `vllm_node` |
 | `CONFIGS_DIR` | Override config output directory | `<project>/configs` |
 | `HOST_BACKUP_DIR` | Incremental backup directory | `/tmp/{moe,fp8}-configs-backup` |
-| `MOD_DIR` | Override mod directory for `--sync-mod` | `~/scripts/vllm/recipes/mods/vllm-tune` |
+| `MAX_RETRIES` | Retry count per tuning item | `1` |
+| `CLUSTER_NODES` | Comma-separated node IPs for `--dist` | _(none)_ |
+| `SPARKRUN_TUNING_DIR` | sparkrun tuning cache path | `~/.cache/sparkrun/tuning/vllm` |
+| `VLLM_TUNE_CONFIG` | Override config.json location | `<project>/config.json` |
 | `PEER_NODES` | Space-separated SSH peers for cache clearing | _(none)_ |
 | `DROP_CACHES_CMD` | Custom cache-drop command | `sync && echo 3 > /proc/sys/vm/drop_caches` |
 

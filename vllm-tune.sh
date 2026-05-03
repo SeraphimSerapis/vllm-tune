@@ -404,9 +404,7 @@ if $STANDALONE && ! $DRY_RUN; then
         docker rm -f "$STANDALONE_CONTAINER" >/dev/null 2>&1 || true
     fi
 
-    # Detect HuggingFace cache for model weights
-    HF_CACHE="${HF_HOME:-${HUGGING_FACE_HUB_TOKEN:+$HOME/.cache/huggingface}}"
-    HF_CACHE="${HF_CACHE:-$HOME/.cache/huggingface}"
+    HF_CACHE="${HF_HOME:-$HOME/.cache/huggingface}"
 
     info "Launching standalone tuning container..."
     info "  Image:     $IMAGE"
@@ -497,7 +495,9 @@ if ! $DEPLOY_ONLY; then
 fi
 
 mkdir -p "$CONFIGS_MOE" "$CONFIGS_FP8" "$REPORT_DIR"
-detect_vllm_paths
+if ! $DRY_RUN; then
+    detect_vllm_paths
+fi
 
 # ── Banner ──────────────────────────────────────────────────────────
 

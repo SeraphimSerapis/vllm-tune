@@ -256,11 +256,12 @@ Tests exit with code 0 on success, non-zero on failure.
 | Variable | Used by | Description |
 |----------|---------|-------------|
 | `VLLM_TUNE_HOME` | vllm-tune.sh | Override config store root |
+| `VLLM_TUNE_CONFIG` | lib/common.sh | Override config.json location |
 | `CONTAINER` | all scripts | Docker container name (default: `vllm_node`) |
 | `CONFIGS_DIR` | tune-*.sh | Override config output directory |
 | `HOST_BACKUP_DIR` | tune-*.sh | Incremental backup directory |
-| `MOD_DIR` | vllm-tune.sh | Override mod directory for `--sync-mod` |
 | `TUNE_SCRIPTS_DIR` | vllm-tune.sh | Override location of tune-*.sh scripts |
+| `SPARKRUN_TUNING_DIR` | vllm-tune.sh | sparkrun tuning cache path |
 | `PEER_NODES` | lib/common.sh | SSH peers for cache clearing |
 | `DROP_CACHES_CMD` | lib/common.sh | Custom cache-drop command |
 | `MAX_RETRIES` | tune-*.sh | Retry count per tuning item (default: 1) |
