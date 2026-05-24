@@ -1,0 +1,13 @@
+{
+    "model": "lovedheart/Qwen3.5-4B-FP8",
+    "tp": 1,
+    "dtype": "fp8_w8a8",
+    "tuned_at": "2026-05-19T02:15:19-05:00",
+    "hostname": "spark-a9d8",
+    "container": "vllm_node",
+    "mode": "fp8",
+    "vllm_version": "0.20.2rc1.dev92+g20cac26b1.d20260507",
+    "triton_version": "3.6.0",
+    "moe_configs": 0,
+    "fp8_configs": 5
+}
