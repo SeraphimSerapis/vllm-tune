@@ -1,0 +1,13 @@
+{
+    "model": "poolside/Laguna-XS.2-FP8",
+    "tp": 1,
+    "dtype": "fp8_w8a8",
+    "tuned_at": "2026-05-22T09:54:16-05:00",
+    "hostname": "spark-a9d8",
+    "container": "vllm_node",
+    "mode": "moe",
+    "vllm_version": "0.20.2rc1.dev372+ge30f39c4f.d20260515",
+    "triton_version": "3.6.0",
+    "moe_configs": 1,
+    "fp8_configs": 5
+}
